@@ -1,4 +1,4 @@
-name: "Ruby-like-Kotlin — FULL AUTO + SpongeLang Backend"
+name: "Freeing-the-Lang — Standard IR → SpongeLang Backend"
 
 on:
   push:
@@ -8,20 +8,20 @@ on:
 permissions:
   contents: write
 
-# ========================================================
-# AUTO TAG
-# ========================================================
+# ===================================================================
+# AUTO TAG JOB
+# ===================================================================
 jobs:
   auto-tag:
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.tag.outputs.tag }}
+      tag: ${{ steps.timestamp.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Generate timestamp tag
-        id: tag
+        id: timestamp
         run: |
           TAG="v$(date +'%Y%m%d-%H%M%S')"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
@@ -30,14 +30,15 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git tag ${{ steps.tag.outputs.tag }}
-          git push origin ${{ steps.tag.outputs.tag }}
+          git tag ${{ steps.timestamp.outputs.tag }}
+          git push origin ${{ steps.timestamp.outputs.tag }}
 
-# ========================================================
-# BUILD (3 OS + SpongeLang Backend)
-# ========================================================
+# ===================================================================
+# BUILD JOB — UNIVERSAL FOR ALL YOUR REPOS
+# ===================================================================
   build:
     needs: auto-tag
+
     strategy:
       fail-fast: false
       matrix:
@@ -48,117 +49,118 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # -----------------------------------------
-      # Setup Rust (Ruby-like-Kotlin front-end)
-      # -----------------------------------------
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      # -----------------------------------------
-      # Build Ruby-like-Kotlin Frontend
-      # -----------------------------------------
-      - name: Build Ruby-like-Kotlin (Rust)
-        run: cargo build --release --verbose
-
-      # -----------------------------------------
-      # Prepare workspace
-      # -----------------------------------------
-      - name: Prepare workspace
-        run: mkdir -p build
-
-      # -----------------------------------------
-      # Generate SpongeLang IR (Frontend → IR)
-      # -----------------------------------------
-      - name: Generate SpongeLang IR
-        run: |
-          echo '(def square (x) (* x x))' > sample.rbk
-          ./target/release/ruby-like-kotlin sample.rbk > build/output.sp
-
-      # -----------------------------------------
-      # Print IR (DEBUG)
-      # -----------------------------------------
-      - name: DEBUG — Show SpongeLang IR
+      # ---------------------------------------------------------------
+      # 1) SpongeLang rlkc 자동 다운로드 (OS별 바이너리)
+      # ---------------------------------------------------------------
+      - name: Install SpongeLang Compiler (rlkc)
         shell: bash
         run: |
-          echo "============= OUTPUT.SP ============="
-          cat build/output.sp || echo "IR NOT FOUND"
-          echo "====================================="
+          mkdir -p spongelang/bin
+          
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            curl -L -o rlkc.zip https://github.com/Freeing-the-Lang/Sponge-lang/releases/download/v0.3/rlkc-linux.zip
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            curl -L -o rlkc.zip https://github.com/Freeing-the-Lang/Sponge-lang/releases/download/v0.3/rlkc-macos.zip
+          else
+            curl -L -o rlkc.zip https://github.com/Freeing-the-Lang/Sponge-lang/releases/download/v0.3/rlkc-windows.zip
+          fi
 
-      # -----------------------------------------
-      # Install NASM (Linux/Mac)
-      # -----------------------------------------
-      - name: Install NASM (Linux/Mac)
-        if: runner.os != 'Windows'
+          unzip rlkc.zip -d spongelang/bin/
+          chmod +x spongelang/bin/rlkc* || true
+
+      # ---------------------------------------------------------------
+      # 2) IR 생성 단계 (언어마다 다른 부분 → 오토 감지 방식)
+      # ---------------------------------------------------------------
+      - name: Generate IR (Auto)
+        shell: bash
         run: |
-          sudo apt-get update || true
-          sudo apt-get install -y nasm || true
+          mkdir -p build
+          
+          # 언어별 예시 파일 자동 생성 (기본 IR)
+          echo "(def sample (x) (* x x))" > sample.input
 
-      # -----------------------------------------
-      # Install NASM (Windows)
-      # -----------------------------------------
-      - name: Install NASM (Windows)
-        if: runner.os == 'Windows'
-        run: choco install nasm -y
+          # 언어 레포에 컴파일러가 있으면 실행
+          if [ -f "./target/release/*" ]; then
+            echo "Detected Rust compiler → compile sample.input"
+            ./target/release/* sample.input > build/output.sp || true
+          elif [ -f "./run.sh" ]; then
+            echo "Detected custom run.sh"
+            bash ./run.sh sample.input > build/output.sp || true
+          else
+            echo "No frontend compiler detected."
+            echo "(func main 0 (ret 0))" > build/output.sp
+          fi
 
-      # -----------------------------------------
-      # SpongeLang Backend (IR → ASM)
-      # -----------------------------------------
-      - name: Convert IR → ASM (rlkc)
+      # ---------------------------------------------------------------
+      # 3) Debug: 출력된 SpongeLang IR 확인
+      # ---------------------------------------------------------------
+      - name: Debug IR
+        shell: bash
         run: |
-          # assumes rlkc is included in repo / or prebuilt
-          ./spongelang/bin/rlkc build/output.sp > build/out.asm
+          echo "======== OUTPUT.SP ========"
+          cat build/output.sp || echo "NO IR"
+          echo "==========================="
 
-      - name: DEBUG — Show ASM
+      # ---------------------------------------------------------------
+      # 4) IR → ASM 변환 (SpongeLang 백엔드 핵심)
+      # ---------------------------------------------------------------
+      - name: SpongeLang IR → ASM
+        run: ./spongelang/bin/rlkc build/output.sp > build/out.asm
+
+      - name: Debug ASM
         run: |
-          echo "============= ASM =============="
-          cat build/out.asm || echo "ASM NOT FOUND"
-          echo "================================"
+          echo "======== ASM ========"
+          cat build/out.asm || echo "NO ASM"
+          echo "======================"
 
-      # -----------------------------------------
-      # ASM → NATIVE (LINUX)
-      # -----------------------------------------
+      # ---------------------------------------------------------------
+      # 5) OS별 링킹 (Linux / Mac / Windows)
+      # ---------------------------------------------------------------
+
+      # Linux
       - name: Build Native (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
+          sudo apt-get update || true
+          sudo apt-get install -y nasm || true
           nasm -felf64 build/out.asm -o build/out.o
           ld build/out.o -o build/app
 
-      # -----------------------------------------
-      # ASM → NATIVE (macOS)
-      # -----------------------------------------
+      # macOS
       - name: Build Native (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          brew install nasm
+          brew install nasm || true
           SDK=$(xcrun --show-sdk-path)
           nasm -fmacho64 build/out.asm -o build/out.o
           ld -macosx_version_min 11.0 -syslibroot $SDK -lSystem -e _main build/out.o -o build/app
 
-      # -----------------------------------------
-      # ASM → NATIVE (Windows)
-      # -----------------------------------------
+      # Windows
       - name: Build Native (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
+          choco install nasm -y
           nasm -f win64 build/out.asm -o build/out.obj
-          $vcvars = "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          if (!(Test-Path $vcvars)) {
-            $vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          }
-          cmd.exe /c "`"$vcvars`" && link.exe /DEBUG /ENTRY:main /SUBSYSTEM:CONSOLE build/out.obj /OUT:build/app.exe"
 
-      # -----------------------------------------
-      # Upload artifacts
-      # -----------------------------------------
+          $vc = "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if (!(Test-Path $vc)) {
+            $vc = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          }
+
+          cmd.exe /c "`"$vc`" && link.exe /DEBUG /ENTRY:main /SUBSYSTEM:CONSOLE build/out.obj /OUT:build/app.exe"
+
+      # ---------------------------------------------------------------
+      # 6) Upload artifacts (3 OS)
+      # ---------------------------------------------------------------
       - uses: actions/upload-artifact@v4
         with:
-          name: ruby-like-kotlin-${{ matrix.os }}
+          name: ${{ matrix.os }}-build
           path: build/*
 
-# ========================================================
-# RELEASE
-# ========================================================
+# ===================================================================
+# RELEASE JOB
+# ===================================================================
   release:
     needs: [auto-tag, build]
     runs-on: ubuntu-latest
@@ -170,14 +172,14 @@ jobs:
         with:
           path: release-temp
 
-      - name: Organize Release
+      - name: Organize
         run: |
           mkdir -p release/linux release/macos release/windows
-          cp -r release-temp/ruby-like-kotlin-ubuntu-latest/* release/linux/ || true
-          cp -r release-temp/ruby-like-kotlin-macos-latest/* release/macos/ || true
-          cp -r release-temp/ruby-like-kotlin-windows-latest/* release/windows/ || true
+          cp -r release-temp/ubuntu-latest-build/* release/linux/ || true
+          cp -r release-temp/macos-latest-build/* release/macos/ || true
+          cp -r release-temp/windows-latest-build/* release/windows/ || true
 
-      - name: Zip Release Files
+      - name: Zip Release Packs
         run: |
           cd release
           zip -r linux-${{ needs.auto-tag.outputs.tag }}.zip linux
@@ -190,14 +192,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ needs.auto-tag.outputs.tag }}
-          name: "Ruby-like-Kotlin — SpongeLang Backend Release ${{ needs.auto-tag.outputs.tag }}"
-          body: |
-            Ruby-like-Kotlin Experimental Language  
-            (SpongeLang IR Backend Fully Integrated)
-
-            - Ruby-like-Kotlin → SpongeLang IR → NASM → Native  
-            - 3OS Full Auto Build  
-            - Auto Artifact packaging  
-            - Auto Tag + Auto Release  
+          name: "Freeing-the-Lang — ${{
+            github.repository_name }} Release ${{ needs.auto-tag.outputs.tag }}"
           files: release/*.zip
+
 
