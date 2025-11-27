@@ -1,0 +1,108 @@
+name: "Ruby-like-Kotlin — AUTO BUILD (3OS)"
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  auto-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Timestamp Tag
+        id: tag
+        run: |
+          TAG="v$(date +'%Y%m%d-%H%M%S')"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Push Tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag ${{ steps.tag.outputs.tag }}
+          git push origin ${{ steps.tag.outputs.tag }}
+
+  build:
+    needs: auto-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # -----------------------------------------
+      # Optional: If Ruby-like-Kotlin has a parser prototype
+      # -----------------------------------------
+      - name: Setup Java (for Kotlin)
+        if: runner.os != 'Windows'
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # -----------------------------------------
+      # Build step (customize later!)
+      # -----------------------------------------
+      - name: Dummy Build
+        shell: bash
+        run: |
+          mkdir -p build
+          echo "Ruby-like-Kotlin build placeholder" > build/result.txt
+          echo "OS=${{ runner.os }}" >> build/result.txt
+
+      # -----------------------------------------
+      # Upload artifacts
+      # -----------------------------------------
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ruby-like-kotlin-${{ matrix.os }}
+          path: build/*
+
+  release:
+    needs: [auto-tag, build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-temp
+
+      - name: Organize Release
+        run: |
+          mkdir -p release/linux release/macos release/windows
+          cp -r release-temp/ruby-like-kotlin-ubuntu-latest/* release/linux/ || true
+          cp -r release-temp/ruby-like-kotlin-macos-latest/* release/macos/ || true
+          cp -r release-temp/ruby-like-kotlin-windows-latest/* release/windows/ || true
+
+      - name: Zip Release Files
+        run: |
+          cd release
+          zip -r linux-${{ needs.auto-tag.outputs.tag }}.zip linux
+          zip -r macos-${{ needs.auto-tag.outputs.tag }}.zip macos
+          zip -r windows-${{ needs.auto-tag.outputs.tag }}.zip windows
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.auto-tag.outputs.tag }}
+          name: "Ruby-like-Kotlin — Auto Release ${{ needs.auto-tag.outputs.tag }}"
+          body: |
+            Ruby-like-Kotlin Experimental Language
+            - 3OS 자동 빌드 완료
+            - Multi-stage artifact packaging
+          files: release/*.zip
