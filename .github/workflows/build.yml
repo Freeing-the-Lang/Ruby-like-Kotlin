@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 # ===================================================================
-# AUTO TAG JOB
+# 1) AUTO TAG JOB
 # ===================================================================
 jobs:
   auto-tag:
@@ -33,8 +33,9 @@ jobs:
           git tag ${{ steps.timestamp.outputs.tag }}
           git push origin ${{ steps.timestamp.outputs.tag }}
 
+
 # ===================================================================
-# BUILD JOB — UNIVERSAL FOR ALL YOUR REPOS
+# 2) BUILD JOB — UNIVERSAL FRONTEND → IR → SPONGELANG BACKEND
 # ===================================================================
   build:
     needs: auto-tag
@@ -49,73 +50,100 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ---------------------------------------------------------------
-      # 1) SpongeLang rlkc 자동 다운로드 (OS별 바이너리)
-      # ---------------------------------------------------------------
-      - name: Install SpongeLang Compiler (rlkc)
+
+      # ===================================================================
+      # (A) 최신 SpongeLang Backend 자동 다운로드 (OS 자동 선택)
+      # ===================================================================
+      - name: Install Latest SpongeLang Backend
         shell: bash
         run: |
           mkdir -p spongelang/bin
-          
+
+          # 최신 Release 버전 자동 파싱
+          LATEST=$(curl -s https://api.github.com/repos/Freeing-the-Lang/Sponge-lang/releases/latest \
+            | grep "tag_name" | cut -d '"' -f 4)
+
+          echo "Latest SpongeLang release: $LATEST"
+
+          # OS별 파일명
           if [[ "$RUNNER_OS" == "Linux" ]]; then
-            curl -L -o rlkc.zip https://github.com/Freeing-the-Lang/Sponge-lang/releases/download/v0.3/rlkc-linux.zip
+            FILE="spongelang-linux.zip"
           elif [[ "$RUNNER_OS" == "macOS" ]]; then
-            curl -L -o rlkc.zip https://github.com/Freeing-the-Lang/Sponge-lang/releases/download/v0.3/rlkc-macos.zip
+            FILE="spongelang-macos.zip"
           else
-            curl -L -o rlkc.zip https://github.com/Freeing-the-Lang/Sponge-lang/releases/download/v0.3/rlkc-windows.zip
+            FILE="spongelang-windows.zip"
           fi
 
-          unzip rlkc.zip -d spongelang/bin/
-          chmod +x spongelang/bin/rlkc* || true
+          URL="https://github.com/Freeing-the-Lang/Sponge-lang/releases/download/$LATEST/$FILE"
+          echo "Downloading $URL"
 
-      # ---------------------------------------------------------------
-      # 2) IR 생성 단계 (언어마다 다른 부분 → 오토 감지 방식)
-      # ---------------------------------------------------------------
+          curl -L -o backend.zip "$URL"
+          unzip backend.zip -d spongelang/bin/ || echo "Unzip failed?"
+          chmod +x spongelang/bin/* || true
+
+          echo "[DEBUG] SpongeLang backend installed:"
+          ls -al spongelang/bin || true
+
+
+      # ===================================================================
+      # (B) Frontend → IR 생성 (repo에 따라 자동 감지)
+      # ===================================================================
       - name: Generate IR (Auto)
         shell: bash
         run: |
           mkdir -p build
-          
-          # 언어별 예시 파일 자동 생성 (기본 IR)
+
           echo "(def sample (x) (* x x))" > sample.input
 
-          # 언어 레포에 컴파일러가 있으면 실행
-          if [ -f "./target/release/*" ]; then
-            echo "Detected Rust compiler → compile sample.input"
-            ./target/release/* sample.input > build/output.sp || true
+          # Rust compiler case
+          if comp=$(ls target/release/* 2>/dev/null | head -n 1); then
+            echo "Detected Rust frontend compiler: $comp"
+            $comp sample.input > build/output.sp || true
+
+          # Custom script case
           elif [ -f "./run.sh" ]; then
-            echo "Detected custom run.sh"
+            echo "Detected run.sh frontend"
             bash ./run.sh sample.input > build/output.sp || true
+
+          # Default fallback IR
           else
-            echo "No frontend compiler detected."
             echo "(func main 0 (ret 0))" > build/output.sp
           fi
 
-      # ---------------------------------------------------------------
-      # 3) Debug: 출력된 SpongeLang IR 확인
-      # ---------------------------------------------------------------
+
+      # ===================================================================
+      # (C) Debug: Print SpongeLang IR
+      # ===================================================================
       - name: Debug IR
         shell: bash
         run: |
           echo "======== OUTPUT.SP ========"
-          cat build/output.sp || echo "NO IR"
+          cat build/output.sp || echo "NO IR FOUND"
           echo "==========================="
 
-      # ---------------------------------------------------------------
-      # 4) IR → ASM 변환 (SpongeLang 백엔드 핵심)
-      # ---------------------------------------------------------------
-      - name: SpongeLang IR → ASM
-        run: ./spongelang/bin/rlkc build/output.sp > build/out.asm
+
+      # ===================================================================
+      # (D) IR → ASM 변환
+      # ===================================================================
+      - name: IR → ASM (SpongeLang Backend)
+        shell: bash
+        run: |
+          BACKEND=$(ls spongelang/bin/* 2>/dev/null | head -n 1)
+          echo "Using backend: $BACKEND"
+          $BACKEND build/output.sp > build/out.asm
+
 
       - name: Debug ASM
+        shell: bash
         run: |
           echo "======== ASM ========"
-          cat build/out.asm || echo "NO ASM"
+          cat build/out.asm || echo "NO ASM FOUND"
           echo "======================"
 
-      # ---------------------------------------------------------------
-      # 5) OS별 링킹 (Linux / Mac / Windows)
-      # ---------------------------------------------------------------
+
+      # ===================================================================
+      # (E) OS별 원시 실행파일(Native Binary) 빌드
+      # ===================================================================
 
       # Linux
       - name: Build Native (Linux)
@@ -150,16 +178,18 @@ jobs:
 
           cmd.exe /c "`"$vc`" && link.exe /DEBUG /ENTRY:main /SUBSYSTEM:CONSOLE build/out.obj /OUT:build/app.exe"
 
-      # ---------------------------------------------------------------
-      # 6) Upload artifacts (3 OS)
-      # ---------------------------------------------------------------
+
+      # ===================================================================
+      # (F) Upload artifacts (OS별)
+      # ===================================================================
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}-build
           path: build/*
 
+
 # ===================================================================
-# RELEASE JOB
+# 3) RELEASE JOB
 # ===================================================================
   release:
     needs: [auto-tag, build]
@@ -192,8 +222,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ needs.auto-tag.outputs.tag }}
-          name: "Freeing-the-Lang — ${{
-            github.repository_name }} Release ${{ needs.auto-tag.outputs.tag }}"
+          name: "Freeing-the-Lang — ${{ github.repository }} — ${{ needs.auto-tag.outputs.tag }}"
           files: release/*.zip
-
 
